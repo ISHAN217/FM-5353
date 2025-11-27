@@ -1,0 +1,186 @@
+﻿@page "/"
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+<PageTitle>Quant Dashboard</PageTitle>
+
+<style>
+    .risk-bar-bg { background-color: #e9ecef; border-radius: 4px; height: 8px; width: 60px; display: inline-block; margin-left: 5px; }
+    .risk-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+    .call-tag { background-color: #d1e7dd; color: #0f5132; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: bold; }
+    .put-tag { background-color: #f8d7da; color: #842029; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: bold; }
+</style>
+
+<div class="container-fluid" style="margin-top: 20px;">
+    <div class="row">
+        <div class="col-lg-3">
+            <div class="card shadow mb-4">
+                <div class="card-header bg-primary text-white">
+                    <h6 class="mb-0">⚡ New Position</h6>
+                </div>
+                <div class="card-body">
+                    <div class="mb-2">
+                        <label class="form-label fw-bold text-muted small">Option Type</label>
+                        <select class="form-select form-select-sm" @bind="newTrade.Type">
+                            <option value="Call">📈 Call</option>
+                            <option value="Put">📉 Put</option>
+                        </select>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label fw-bold text-muted small">Ticker</label>
+                        <input class="form-control form-control-sm" @bind="newTrade.Symbol" placeholder="e.g. SPY" />
+                    </div>
+                    <div class="row mb-2">
+                        <div class="col">
+                            <label class="form-label fw-bold text-muted small">Spot</label>
+                            <input type="number" class="form-control form-control-sm" @bind="newTrade.SpotPrice" />
+                        </div>
+                        <div class="col">
+                            <label class="form-label fw-bold text-muted small">Strike</label>
+                            <input type="number" class="form-control form-control-sm" @bind="newTrade.StrikePrice" />
+                        </div>
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label fw-bold text-muted small">Vol (0.1-1.0)</label>
+                        <input type="number" class="form-control form-control-sm" @bind="newTrade.Volatility" step="0.01" />
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-bold text-muted small">Expiry</label>
+                        <input type="date" class="form-control form-control-sm" @bind="newTrade.ExpirationDate" />
+                    </div>
+                    <button class="btn btn-success w-100 fw-bold btn-sm" @onclick="SubmitTrade">🚀 Execute</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-9">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3>📊 Portfolio Risk Matrix</h3>
+                <button class="btn btn-outline-primary btn-sm" @onclick="RunSimulation">
+                    🔄 Re-Calc Greeks
+                </button>
+            </div>
+
+            @if (valuations == null)
+            {
+                <div class="alert alert-light border text-center p-5">Loading...</div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle table-hover shadow-sm border bg-white" style="font-size: 0.9em;">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Type</th>
+                                <th>Sym</th>
+                                <th>Val</th>
+                                <th>Delta (Δ)</th>
+                                <th>Gamma (Γ)</th>
+                                <th>Vega (ν)</th>
+                                <th>Theta (Θ)</th>
+                                <th>Rho (ρ)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var v in valuations)
+                            {
+                                bool isPut = v.delta < 0; 
+                                <tr>
+                                    <td><span class="@(isPut ? "put-tag" : "call-tag")">@(isPut ? "P" : "C")</span></td>
+                                    <td class="fw-bold">@v.symbol</td>
+                                    <td>@v.marketValue.ToString("C0")</td>
+                                    
+                                    <td>
+                                        <div class="d-flex align-items-center">
+                                            <span style="width: 40px;">@v.delta.ToString("F2")</span>
+                                            <div class="risk-bar-bg">
+                                                <div class="risk-bar-fill" 
+                                                     style="width: @(Math.Min((double)Math.Abs(v.delta * 100), 100))%; 
+                                                            background-color: @(Math.Abs(v.delta) > 0.7m ? "#dc3545" : "#0d6efd");">
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td>@v.gamma.ToString("F4")</td>
+                                    <td class="text-info">@v.vega.ToString("F3")</td>
+                                    <td class="text-danger">@v.theta.ToString("F2")</td>
+                                    <td class="text-muted">@v.rho.ToString("F3")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private ValuationResult[]? valuations;
+    private TradeInputModel newTrade = new TradeInputModel();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RunSimulation();
+    }
+
+    private async Task SubmitTrade()
+    {
+        var tradePayload = new
+        {
+            quantity = 100,
+            status = "Active",
+            derivative = new
+            {
+                type = newTrade.Type,
+                strikePrice = newTrade.StrikePrice,
+                expirationDate = newTrade.ExpirationDate,
+                riskFreeRate = 0.05,
+                underlying = new
+                {
+                    symbol = newTrade.Symbol.ToUpper(),
+                    companyName = newTrade.Symbol,
+                    currentPrice = newTrade.SpotPrice,
+                    volatility = newTrade.Volatility
+                }
+            }
+        };
+
+        var response = await Http.PostAsJsonAsync("http://localhost:5225/api/portfolio/trade", tradePayload);
+        if (response.IsSuccessStatusCode) await RunSimulation();
+    }
+
+    private async Task RunSimulation()
+    {
+        try 
+        {
+            var response = await Http.PostAsync("http://localhost:5225/api/portfolio/evaluate", null);
+            if (response.IsSuccessStatusCode)
+                valuations = await response.Content.ReadFromJsonAsync<ValuationResult[]>();
+        }
+        catch (Exception ex) { Console.WriteLine(ex.Message); }
+    }
+
+    public class TradeInputModel
+    {
+        public string Type { get; set; } = "Call";
+        public string Symbol { get; set; } = "";
+        public decimal SpotPrice { get; set; } = 100;
+        public decimal StrikePrice { get; set; } = 100;
+        public decimal Volatility { get; set; } = 0.25m;
+        public DateTime ExpirationDate { get; set; } = DateTime.Now.AddMonths(3);
+    }
+
+    public class ValuationResult
+    {
+        public int tradeId { get; set; }
+        public string symbol { get; set; } = "";
+        public int quantity { get; set; }
+        public decimal marketValue { get; set; }
+        public decimal delta { get; set; }
+        public decimal gamma { get; set; }
+        public decimal vega { get; set; }
+        public decimal theta { get; set; }
+        public decimal rho { get; set; }
+    }
+}
